@@ -1,0 +1,298 @@
+public class SdrActivityCrud extends CrudRunnerGenId<SdrActivity> implements ResourceSecurityUnaware {
+    public static final String APP = AppIdsConstants.APP_SDR_MAIN.getCode();
+    public static final String BIZ_OBJECT = "sdrActivity";
+    private static final Log log = Logging.getLog(SdrActivityCrud.class);
+    
+    @Autowired
+    @Qualifier("sdrActivityDAO")
+    private GenericDAO<SdrActivity, Long> sdrActivityDAO;
+    
+    @Autowired
+    @Qualifier("sdrAtsResponseDAO")
+    private GenericDAO<SdrAtsResponse, Long> sdrAtsResponseDAO;
+    
+    @Autowired
+    @Qualifier("lynxSessionFactory")
+    private SessionFactory sessionFactory;
+    
+    @Override
+    public String getApplicationId() {
+        return APP;
+    }
+    
+    @Override
+    public EntityMeta<SdrActivity> getEntityMeta() {
+        return new SdrActivityMeta();
+    }
+    
+    @Override
+    public CrudValidator getValidator() {
+        return DefaultCrudValidator.getInstance();
+    }
+    
+    @Override
+    public GenericDAO<SdrActivity, Long> getCurrentDao() {
+        return super.getDaoSelector().getDao(DatasourceType.HISTORY);
+    }
+    
+    private static final String UPDATE_TYPE = CashieringBlotterTradeForm.UPDATE_TYPE;
+    private final String REVIVE = CashieringBlotterTradeForm.FormMode.REVIVE.toString();
+    private final String APPROVE = CashieringBlotterTradeForm.FormMode.APPROVE.toString();
+    private final String REJECT = CashieringBlotterTradeForm.FormMode.REJECT.toString();
+    private final String SETTLE = CashieringBlotterTradeForm.FormMode.SETTLE.toString();
+    private static final String USER_ID_PARAM = CashieringBlotterToolBar.USER_ID_PARAM;
+    private static final String USER_NAME_PARAM = CashieringBlotterToolBar.USER_NAME_PARAM;
+    
+    @Transactional(propagation = Propagation.REQUIRED)
+    public UpdateOpResultTO update(
+            final String bizObjectName, 
+            final String idValue, 
+            final String[] fieldIds, 
+            final String[] fieldValues, 
+            final ParamTO[] params) {
+        
+        boolean hasPermission = SecurityHelper.isCurrentUserEntitledOnProtectedResource(
+            EntitlementType.EDIT_ACCESS, AppIdsConstants.APP_SDR_MAIN);
+        
+        if (!hasPermission) {
+            final String warn = SecurityHelper.SECURITY_MESSAGE_PREFIX + " User " + 
+                SecurityHelper.getCurrentUserName() + " with readonly access";
+            log.error("%s", warn);
+            UpdateOpResultTO updResultTO = new UpdateOpResultTO();
+            updResultTO.setValid(false);
+            updResultTO.updatedRecs = 0;
+            updResultTO.setGlobalMessages(new String[]{"Error occurred.", warn, "Warning"});
+            throw new SecurityException(warn);
+        }
+        
+        UpdateOpResultTO updResultTO = new UpdateOpResultTO();
+        
+        if (params != null && params.length > 0) {
+            log.info("update Param[0] name: %s and value: %s and id: %s", 
+                params[0].getName(), params[0].getValue(), idValue);
+            
+            if (UPDATE_TYPE.equals(params[0].getName())) {
+                String updateType = params[0].getValue();
+                log.info("Update type = %s", updateType);
+                
+                if (REVIVE.equals(updateType)) {
+                    return handleReviveAction(fieldValues, params, updResultTO);
+                } else if (APPROVE.equals(updateType) || REJECT.equals(updateType)) {
+                    // Your existing approve/reject logic
+                    try {
+                        log.info("Trying to " + updateType + " record with id: %s", idValue);
+                        SdrActivity record = sdrActivityDAO.findById(new Long(idValue));
+                        boolean opsRejectFlag = enableOpsReject(updateType, record);
+                        
+                        if (record == null) {
+                            updResultTO.setGlobalMessages(new String[]{"Transfer processing failed"});
+                            log.error("Could not find SdrActivity object");
+                            throw new Exception("Transfer processing failed");
+                        }
+                        
+                        if (REJECT.equals(updateType)) {
+                            if (!ApprovalStatus.UNAPPROVED.equalsIgnoreCase(record.getOpsApproved()) && !opsRejectFlag) {
+                                log.error("The Transfer is not in a state to " + updateType + ", Id %s Lynx Id %s", 
+                                    record.getId(), record.getLynxId());
+                                throw new Exception("The Transfer is not in state to " + updateType + ", Id -> " + record.getId());
+                            }
+                        } else {
+                            if (!ApprovalStatus.UNAPPROVED.equalsIgnoreCase(record.getOpsApproved())) {
+                                log.error("The Transfer is not in a state to " + updateType + ", Id %s Lynx Id %s", 
+                                    record.getId(), record.getLynxId());
+                                throw new Exception("The Transfer is not in state to " + updateType + ", Id -> " + record.getId());
+                            }
+                        }
+                        
+                        createSdrActivityObject(fieldIds, fieldValues, record);
+                        record.setLastModified(new Date());
+                        
+                        if (opsRejectFlag) {
+                            record.setDeliveryStatus(DeliveryStatus.OPS_REJECTED.toString());
+                            log.info("Setting Delivery status to OPS_REJECTED: %s", idValue);
+                        }
+                        
+                        sdrActivityDAO.store(record);
+                        log.info("Save of Transfer successful for action " + updateType + " with id: %s", idValue);
+                        
+                    } catch (Exception ex) {
+                        log.error("Error while processing the " + updateType + ": %s", ex.getLocalizedMessage());
+                        updResultTO.setGlobalMessages(new String[]{
+                            "<b><font color=\"red\">" + updateType + " failed </font>:</b><br/>" +
+                            "Unexpected exception, please contact support"
+                        });
+                        updResultTO.updatedRecs = 0;
+                        updResultTO.setValid(false);
+                        return updResultTO;
+                    }
+                } else if (CashieringBlotterToolBar.APPROVE_ALL.equals(updateType) ||
+                          CashieringBlotterToolBar.REJECT_ALL.equals(updateType)) {
+                    // Your existing approve all/reject all logic
+                    // ... [Include your existing logic] ...
+                } else if (SETTLE.equals(updateType)) {
+                    // Your existing settle logic
+                    // ... [Include your existing settle logic] ...
+                } else {
+                    throw new IllegalArgumentException("Expected name of Params[0] is " + UPDATE_TYPE);
+                }
+            }
+        } else {
+            return super.update(bizObjectName, idValue, fieldIds, fieldValues, params);
+        }
+        
+        return updResultTO;
+    }
+    
+    private UpdateOpResultTO handleReviveAction(String[] fieldValues, ParamTO[] params, UpdateOpResultTO updResultTO) {
+        log.info("Inside REVIVE action");
+        
+        String userId = null;
+        String userName = null;
+        
+        if (params.length != 3) {
+            throw new IllegalArgumentException("Expected 3 paramTOs for revive action");
+        }
+        
+        if (USER_ID_PARAM.equals(params[1].getName())) {
+            userId = params[1].getValue();
+        } else {
+            throw new IllegalArgumentException("Expected name of Params[1] is " + USER_ID_PARAM);
+        }
+        
+        if (USER_NAME_PARAM.equals(params[2].getName())) {
+            userName = params[2].getValue();
+        } else {
+            throw new IllegalArgumentException("Expected name of Params[2] is " + USER_NAME_PARAM);
+        }
+        
+        if (fieldValues.length > 0) {
+            try {
+                log.info("Request to revive %s records", fieldValues.length);
+                
+                Session session = sessionFactory.getCurrentSession();
+                int updatedCount = 0;
+                
+                for (String wfId : fieldValues) {
+                    // Execute the SQL operations as specified
+                    
+                    // First SQL: Update OS_WFENTRY
+                    String updateWfEntrySql = "UPDATE do.OS_WFENTRY SET active = 'N' " +
+                                            "WHERE ID = (SELECT wf_id FROM sdr_activity WHERE ats_id = :wfId)";
+                    
+                    Query updateWfEntryQuery = session.createSQLQuery(updateWfEntrySql);
+                    updateWfEntryQuery.setParameter("wfId", wfId);
+                    int wfEntryUpdated = updateWfEntryQuery.executeUpdate();
+                    
+                    // Second SQL: Update sdr_activity
+                    String updateSdrActivitySql = "UPDATE sdr_activity SET " +
+                                                "processed = 'U', " +
+                                                "wf_id = NULL, " +
+                                                "wf = NULL, " +
+                                                "processing_date = GETDATE(), " +
+                                                "last_modified = GETDATE(), " +
+                                                "last_modified_user_id = :lastModifiedUser " +
+                                                "WHERE ats_id = :wfId";
+                    
+                    Query updateSdrActivityQuery = session.createSQLQuery(updateSdrActivitySql);
+                    updateSdrActivityQuery.setParameter("lastModifiedUser", "REVIVE-" + userId);
+                    updateSdrActivityQuery.setParameter("wfId", wfId);
+                    int sdrActivityUpdated = updateSdrActivityQuery.executeUpdate();
+                    
+                    if (wfEntryUpdated > 0 || sdrActivityUpdated > 0) {
+                        updatedCount++;
+                    }
+                    
+                    log.info("Revive operation completed for wfId: %s, wfEntry updated: %d, sdrActivity updated: %d", 
+                            wfId, wfEntryUpdated, sdrActivityUpdated);
+                }
+                
+                updResultTO.updatedRecs = updatedCount;
+                updResultTO.setGlobalMessages(new String[]{"Revive operation completed successfully"});
+                updResultTO.setValid(true);
+                
+                log.info("Revive batch was successful for %d records", updatedCount);
+                return updResultTO;
+                
+            } catch (Exception ex) {
+                log.error("Error in revive operation: %s", ex.getLocalizedMessage(), ex);
+                updResultTO.updatedRecs = 0;
+                updResultTO.setValid(false);
+                updResultTO.setGlobalMessages(new String[]{
+                    "<b><font color=\"red\">Revive Failed</font>:</b><br/>" +
+                    "Unexpected exception, please contact support"
+                });
+                return updResultTO;
+            }
+        } else {
+            updResultTO.setGlobalMessages(new String[]{
+                "<b><font color=\"red\">Invalid Request</font>:</b><br/>" +
+                "No records provided, please contact support"
+            });
+            updResultTO.updatedRecs = 0;
+            updResultTO.setValid(false);
+            log.error("Invalid Request - No records provided for revive operation");
+            return updResultTO;
+        }
+    }
+    
+    // Keep all your existing helper methods
+    private boolean enableOpsReject(String updateType, SdrActivity record) {
+        boolean flag = false;
+        if (updateType != null && REJECT.equals(updateType)) {
+            String deliveryStatus = record.getDeliveryStatus() != null ? record.getDeliveryStatus() : "";
+            String transferType = record.getTransferType() != null ? record.getTransferType() : "";
+            
+            deliveryStatus = deliveryStatus.trim();
+            transferType = transferType.trim();
+            
+            if (deliveryStatus.equalsIgnoreCase("AWAIT_SETTLEMENT")) {
+                if (transferType.equalsIgnoreCase("RECEIVE_FREE") ||
+                    transferType.equalsIgnoreCase("RECEIVE_VS_PAYMENT") ||
+                    transferType.equalsIgnoreCase("DWAC_WITHDRAWAL") ||
+                    transferType.equalsIgnoreCase("DWAC_DEPOSIT")) {
+                    flag = true;
+                }
+            }
+        }
+        return flag;
+    }
+    
+    private SdrActivity createSdrActivityObject(
+            final String[] fieldIds, 
+            final String[] fieldValues, 
+            SdrActivity sdrActivity) throws Exception {
+        
+        List<String> propNameList = Arrays.asList(SdrActivityPropAccessor.allPropNamesArray);
+        String fieldId = "";
+        
+        try {
+            for (int i = 0; i < fieldIds.length; i++) {
+                fieldId = fieldIds[i];
+                
+                if (!SdrActivityPropAccessor.idProp.getPropertyName().equals(fieldId)) {
+                    Class<?> propClassType = SdrActivityPropAccessor.allPropTypesArray[propNameList.indexOf(fieldId)];
+                    String setterMethodName = "set" + fieldId.substring(0, 1).toUpperCase() + fieldId.substring(1);
+                    
+                    log.info("inside createSdrActivityObject: " + setterMethodName + " value " + fieldValues[i]);
+                    
+                    Method propSetterMethod = sdrActivity.getClass().getDeclaredMethod(setterMethodName, propClassType);
+                    Object propValObj = ParseToJava.parseInto(propClassType, fieldValues[i]);
+                    
+                    if (propSetterMethod != null) {
+                        propSetterMethod.invoke(sdrActivity, propValObj);
+                    }
+                }
+            }
+        } catch (Exception ex) {
+            log.error("Error creating sdrActivity from the UI input " + fieldId + " fields: %s", ex.getLocalizedMessage());
+            throw ex;
+        }
+        
+        return sdrActivity;
+    }
+    
+    @Override
+    public PropAccessor<SdrActivity, Long> getProtectedResourceIdAccessor() {
+        return null;
+    }
+}
