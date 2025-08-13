@@ -1,0 +1,397 @@
+public class CashieringBlotterToolBar {
+    private TextButton reviveButton;
+    private TextButton viewButton;
+    private TextButton approveButton;
+    private TextButton rejectButton;
+    private TextButton settleButton;
+    
+    private boolean entitledToApprove = true;
+    public static final String BIZ_OBJECT = "sdrActivity";
+    private static final String Y = BoolEnum.YN.getStrTrueValue();
+    private static final String N = BoolEnum.YN.getStrFalseValue();
+    
+    public static final String TRADE_APPROVAL_FLAG_PARAM = "TRADE_APPROVAL_FLAG_PARAM";
+    public static final String TRADE_ID_PARAM = "TRADE_ID_PARAM";
+    public static final String USER_ID_PARAM = "USER_ID_PARAM";
+    public static final String USER_NAME_PARAM = "USER_NAME_PARAM";
+    public static final String APPROVE_ALL = "APPROVE_ALL";
+    public static final String REJECT_ALL = "REJECT_ALL";
+    public static final String SETTLE = "SETTLE";
+    public static final String REVIVE = "REVIVE";
+    
+    private CashieringWindow cashieringWindow;
+    
+    public String getBizObjectName() {
+        return BIZ_OBJECT;
+    }
+    
+    public CashieringBlotterToolBar(CashieringWindow cashieringBlotterTableView) {
+        this.cashieringWindow = cashieringBlotterTableView;
+        reviveButton = createReviveButton();
+        viewButton = createViewButton();
+        approveButton = createApproveButton();
+        rejectButton = createRejectButton();
+        settleButton = createSettleButton();
+        //checkEntitlements();
+    }
+    
+    public TextButton getReviveButton() {
+        return reviveButton;
+    }
+    
+    public TextButton getViewButton() {
+        return viewButton;
+    }
+    
+    public TextButton getApproveButton() {
+        return approveButton;
+    }
+    
+    public TextButton getRejectButton() {
+        return rejectButton;
+    }
+    
+    public TextButton getSettleButton() {
+        return settleButton;
+    }
+    
+    public void toggleActionButtons() {
+        List<ModelData<String>> selections = cashieringWindow.getTableView().getSelectionModel().getSelectedItems();
+        
+        // Enable/disable revive button based on error condition
+        if (shouldEnableRevive(selections)) {
+            reviveButton.enable();
+        } else {
+            reviveButton.disable();
+        }
+        
+        // Enable other buttons initially
+        viewButton.enable();
+        approveButton.enable();
+        rejectButton.enable();
+        
+        // Settle Button status
+        boolean settleFlag = false;
+        if (selections != null) {
+            for (ModelData selectedRecord : selections) {
+                String transferType = (String) selectedRecord.get(CashieringBlotterFieldsDef.transferType);
+                if ((TransferType.DWAC_WITHDRAWAL.value().equalsIgnoreCase(transferType) || 
+                     TransferType.DWAC_DEPOSIT.value().equalsIgnoreCase(transferType) ||
+                     TransferType.RECEIVE_FREE.value().equalsIgnoreCase(transferType) ||
+                     TransferType.RECEIVE_VS_PAYMENT.value().equalsIgnoreCase(transferType))
+                    && DeliveryStatus.AWAIT_SETTLEMENT.getCode().equalsIgnoreCase(
+                        (String) selectedRecord.get(CashieringBlotterFieldsDef.deliveryStatus))) {
+                    settleFlag = true;
+                } else {
+                    settleFlag = false;
+                    break;
+                }
+            }
+        }
+        
+        // Check approve/reject button status
+        if (selections != null) {
+            for (ModelData selectedRecord : selections) {
+                if (!ApprovalStatus.UNAPPROVED.equalsIgnoreCase(
+                        (String) selectedRecord.get(CashieringBlotterFieldsDef.opsApproved))) {
+                    approveButton.disable();
+                }
+                
+                String transferType = (String) selectedRecord.get(CashieringBlotterFieldsDef.transferType);
+                if (transferType == null) {
+                    transferType = "";
+                }
+                
+                if (transferType.equalsIgnoreCase("RECEIVE_FREE") ||
+                    transferType.equalsIgnoreCase("RECEIVE_VS_PAYMENT") ||
+                    transferType.equalsIgnoreCase("DWAC_WITHDRAWAL") || 
+                    transferType.equalsIgnoreCase("DWAC_DEPOSIT")) {
+                    
+                    String deliveryStatus = (String) selectedRecord.get(CashieringBlotterFieldsDef.deliveryStatus);
+                    if (deliveryStatus == null) {
+                        deliveryStatus = "";
+                    }
+                    
+                    if (!deliveryStatus.equalsIgnoreCase("AWAIT_SETTLEMENT")) {
+                        rejectButton.disable();
+                    }
+                } else {
+                    if (!ApprovalStatus.UNAPPROVED.equalsIgnoreCase(
+                            (String) selectedRecord.get(CashieringBlotterFieldsDef.opsApproved))) {
+                        rejectButton.disable();
+                    }
+                }
+            }
+        }
+        
+        if (settleFlag) {
+            settleButton.enable();
+        } else {
+            settleButton.disable();
+        }
+    }
+    
+    /**
+     * Helper method to check if a record has the specific error condition for revive
+     */
+    private boolean hasReviveErrorCondition(ModelData record) {
+        String errorMsg = (String) record.get(CashieringBlotterFieldsDef.errorMsg);
+        return errorMsg != null && errorMsg.contains("Product enrichment error in LynxWorkflow");
+    }
+    
+    /**
+     * Helper method to check if revive should be enabled for current selections
+     */
+    private boolean shouldEnableRevive(List<ModelData<String>> selections) {
+        if (selections == null || selections.isEmpty()) {
+            return false;
+        }
+        
+        // Enable revive only if at least one record has the specific error condition
+        for (ModelData record : selections) {
+            if (hasReviveErrorCondition(record)) {
+                return true;
+            }
+        }
+        
+        return false;
+    }
+    
+    private TextButton createReviveButton() {
+        reviveButton = new TextButton();
+        reviveButton.setTitle("Revive button");
+        reviveButton.setIcon(LynxResourceBundle.get.revive()); // Adjust icon as needed
+        reviveButton.disable();
+        
+        reviveButton.addSelectHandler(new SelectEvent.SelectHandler() {
+            @Override
+            public void onSelect(SelectEvent event) {
+                List<ModelData<String>> selections = cashieringWindow.getTableView().getSelectionModel().getSelectedItems();
+                
+                if (selections != null) {
+                    // Validate that selected records have the specific error message
+                    List<String> validWfIds = new LinkedList<String>();
+                    List<String> invalidRecords = new LinkedList<String>();
+                    
+                    for (ModelData record : selections) {
+                        String errorMsg = (String) record.get(CashieringBlotterFieldsDef.errorMsg);
+                        String wfId = (String) record.get(CashieringBlotterFieldsDef.wfId);
+                        
+                        if (errorMsg != null && errorMsg.contains("Product enrichment error in LynxWorkflow")) {
+                            if (wfId != null && !wfId.isEmpty()) {
+                                validWfIds.add(wfId);
+                            }
+                        } else {
+                            String recordId = (String) record.get(CashieringBlotterFieldsDef.id);
+                            invalidRecords.add(recordId != null ? recordId : "Unknown");
+                        }
+                    }
+                    
+                    if (!validWfIds.isEmpty()) {
+                        if (!invalidRecords.isEmpty()) {
+                            // Show warning about invalid records but proceed with valid ones
+                            String warningMsg = "Some selected records do not have the required error condition and will be skipped.\n" +
+                                              "Invalid records: " + String.join(", ", invalidRecords) + "\n\n" +
+                                              "Do you want to proceed with " + validWfIds.size() + " valid record(s)?";
+                            
+                            SelectEvent.SelectHandler proceedHandler = new SelectEvent.SelectHandler() {
+                                @Override
+                                public void onSelect(SelectEvent event) {
+                                    showReviveDialogBox(validWfIds.toArray(new String[0]));
+                                }
+                            };
+                            
+                            SelectEvent.SelectHandler cancelHandler = new SelectEvent.SelectHandler() {
+                                @Override
+                                public void onSelect(SelectEvent event) {
+                                    // Do nothing - user canceled
+                                }
+                            };
+                            
+                            DialogFactory.getYesNoAlertBox("Warning", warningMsg, null, proceedHandler, cancelHandler).show();
+                        } else {
+                            // All records are valid, proceed normally
+                            showReviveDialogBox(validWfIds.toArray(new String[0]));
+                        }
+                    } else {
+                        // No valid records found
+                        DialogFactory.getOkAlertBox("Error", 
+                            "No selected records have the required error condition: 'Product enrichment error in LynxWorkflow'", 
+                            null, null).show();
+                    }
+                }
+            }
+        });
+        
+        return reviveButton;
+    }
+    
+    public void showReviveDialogBox(final String[] wfIds) {
+        String message = "Are you sure you want to revive " + wfIds.length + " selected record(s)?";
+        
+        SelectEvent.SelectHandler yesHandler = new SelectEvent.SelectHandler() {
+            @Override
+            public void onSelect(SelectEvent event) {
+                cashieringWindow.getTableView().mask("Reviving...");
+                performReviveAction(wfIds);
+            }
+        };
+        
+        SelectEvent.SelectHandler noHandler = new SelectEvent.SelectHandler() {
+            @Override
+            public void onSelect(SelectEvent event) {
+                cashieringWindow.getTableView().unmask();
+            }
+        };
+        
+        DialogFactory.getYesNoAlertBox("Confirm Revive", message, null, yesHandler, noHandler).show();
+    }
+    
+    public void performReviveAction(final String[] wfIds) {
+        final ParamTO updateTypeParam = new ParamTO();
+        updateTypeParam.setName(CashieringBlotterTradeForm.UPDATE_TYPE);
+        updateTypeParam.setValue(REVIVE);
+        
+        final ParamTO userIdParam = new ParamTO();
+        userIdParam.setName(USER_ID_PARAM);
+        userIdParam.setValue(LoginHelper.getCurrentUserId());
+        
+        final ParamTO userNameParam = new ParamTO();
+        userNameParam.setName(USER_NAME_PARAM);
+        userNameParam.setValue(LoginHelper.getCurrentUserId());
+        
+        if (getFullUserName() != null) {
+            userNameParam.setValue(getFullUserName());
+        }
+        
+        IGwtService.Util.getInstance().update(
+            CashieringBlotterTradeForm.BIZ_OBJECT,
+            null,
+            new String[]{CashieringBlotterFieldsDef.wfId},
+            wfIds,
+            new ParamTO[]{updateTypeParam, userIdParam, userNameParam},
+            new AsyncCallback<UpdateOpResultTO>() {
+                @Override
+                public void onFailure(final Throwable caught) {
+                    cashieringWindow.getTableView().unmask();
+                    ExceptionHelper.onFailure(this, caught);
+                    showResponseDialogBox("Revive operation failed.");
+                }
+                
+                @Override
+                public void onSuccess(final UpdateOpResultTO response) {
+                    cashieringWindow.getTableView().unmask();
+                    
+                    if (response.isValid()) {
+                        showResponseDialogBox("Successfully revived " + response.updatedRecs + " record(s)");
+                        cashieringWindow.getTableView().reloadGridCurrentPage();
+                        cashieringWindow.getTableView().getSelectionModel().deselectAll();
+                    } else if (response.getGlobalMessages() != null) {
+                        StringBuilder displayMessage = new StringBuilder();
+                        for (String msg : response.getGlobalMessages()) {
+                            displayMessage.append(msg);
+                        }
+                        showResponseDialogBox(displayMessage.toString());
+                    }
+                }
+            }
+        );
+    }
+    
+    // Keep all your existing methods unchanged (createViewButton, createApproveButton, etc.)
+    private TextButton createViewButton() {
+        viewButton = new TextButton();
+        viewButton.setTitle("View button");
+        viewButton.setIcon(LynxResourceBundle.get.view());
+        viewButton.disable();
+        
+        viewButton.addSelectHandler(new SelectEvent.SelectHandler() {
+            @Override
+            public void onSelect(SelectEvent event) {
+                ModelData selection = cashieringWindow.getTableView().getGridPanel().getGrid().getSelectionModel().getSelectedItem();
+                final CashieringBlotterTradeForm form = new CashieringBlotterTradeForm(
+                    cashieringWindow.getTableView().getParentWindow(),
+                    CashieringBlotterTradeForm.FormMode.VIEW_ONLY);
+                form.setRecord(selection);
+                form.showViewOnlyForm();
+            }
+        });
+        
+        return viewButton;
+    }
+    
+    private TextButton createApproveButton() {
+        approveButton = new TextButton();
+        approveButton.setTitle("Approve button");
+        approveButton.setIcon(LynxResourceBundle.get.approve());
+        approveButton.disable();
+        
+        approveButton.addSelectHandler(new SelectEvent.SelectHandler() {
+            @Override
+            public void onSelect(SelectEvent event) {
+                List<ModelData<String>> selections = cashieringWindow.getTableView().getSelectionModel().getSelectedItems();
+                if (selections != null) {
+                    if (selections.size() == 1) {
+                        final ModelData selectedRecord = selections.get(0);
+                        if (ApprovalStatus.UNAPPROVED.equalsIgnoreCase(
+                                (String) selectedRecord.get(CashieringBlotterFieldsDef.opsApproved))) {
+                            final CashieringBlotterTradeForm approveForm = new CashieringBlotterTradeForm(
+                                cashieringWindow.getTableView().getParentWindow(),
+                                CashieringBlotterTradeForm.FormMode.APPROVE);
+                            approveForm.setRecord(selectedRecord);
+                            approveForm.showApproveForm();
+                        } else {
+                            DialogFactory.getOkAlertBox("Message",
+                                "Transfer is already in Approved/Rejected state or does not need approval.", 
+                                null, null).show();
+                        }
+                    } else if (selections.size() > 1) {
+                        List<String> idList = new LinkedList<String>();
+                        List<ModelData<String>> unapprovedRecordList = new LinkedList<ModelData<String>>();
+                        for (ModelData record : selections) {
+                            String approvalStatus = (String) record.get(CashieringBlotterFieldsDef.opsApproved);
+                            if (ApprovalStatus.UNAPPROVED.equals(approvalStatus)) {
+                                unapprovedRecordList.add(record);
+                                idList.add((String) record.get(CashieringBlotterFieldsDef.id));
+                            }
+                        }
+                        int filteredCount = selections.size() - unapprovedRecordList.size();
+                        cashieringWindow.getTableView().getSelectionModel().deselectAll();
+                        cashieringWindow.getTableView().getSelectionModel().select(unapprovedRecordList, true);
+                        showApproveAllDialogBox(idList.toArray(new String[0]), filteredCount);
+                    }
+                }
+            }
+        });
+        
+        return approveButton;
+    }
+    
+    // Continue with all your existing methods (createRejectButton, createSettleButton, etc.)
+    // ... [Include all your existing methods unchanged] ...
+    
+    private static String getFullUserName() {
+        return LoginHelper.getCurrentUserDetails().getUserFullName();
+    }
+    
+    public void showResponseDialogBox(final String responseMsg) {
+        SelectEvent.SelectHandler okHandler = new SelectEvent.SelectHandler() {
+            @Override
+            public void onSelect(SelectEvent event) {
+                cashieringWindow.getTableView().unmask();
+            }
+        };
+        DialogFactory.getOkAlertBox("Response", responseMsg, null, okHandler).show();
+    }
+    
+    // Keep all your existing methods for approve, reject, settle operations...
+    // [Include the rest of your existing methods unchanged]
+    
+    public boolean isEntitledToApprove() {
+        return entitledToApprove;
+    }
+    
+    public void setEntitledToApprove(boolean entitledToApprove) {
+        this.entitledToApprove = entitledToApprove;
+    }
+}
